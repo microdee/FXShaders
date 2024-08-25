@@ -85,7 +85,7 @@ float4 MainPS(float4 p : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET
 	return color;
 }
 
-technique ColorLab
+technique ColorLab_2
 {
 	pass
 	{
