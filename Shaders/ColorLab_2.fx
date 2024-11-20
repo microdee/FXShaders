@@ -40,11 +40,23 @@ uniform float3 Gamma
 	__UNIFORM_DRAG_FLOAT3
 
 	ui_tooltip =
-		"Generic multiplier to each component of the L*a*b color space.\n"
+		"Curvature of each component of L*a*b color space.\n"
 		"\nDefault: 1.0 1.0 1.0";
 	ui_type = "drag";
 	ui_min = 0.1;
 	ui_max = 4.0;
+	ui_step = 0.01;
+> = 1.0;
+
+uniform float3 LimitsCoeff
+<
+	__UNIFORM_DRAG_FLOAT3
+
+	ui_tooltip =
+		"Modify the limits for the curvature. Coeff of 1 is the entire range";
+	ui_type = "drag";
+	ui_min = 0.1;
+	ui_max = 10.0;
 	ui_step = 0.01;
 > = 1.0;
 
@@ -77,7 +89,7 @@ float4 MainPS(float4 p : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET
 	float4 color = tex2D(BackBuffer, uv);
 	color.xyz = ColorLab::rgb_to_lab(color.rgb);
 
-	color.xyz = pow(abs(color.xyz * invLimits), Gamma) * sign(color.xyz) * limits;
+	color.xyz = pow(abs(color.xyz * invLimits / LimitsCoeff), Gamma) * sign(color.xyz) * limits * LimitsCoeff;
 	color.xyz *= Multiplier;
 	color.xyz += Offset * limits * 0.5;
 
