@@ -250,7 +250,7 @@ float4 BlendPS(float4 p : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET
 
 	color.rgb = ShowLens
 		? lens.rgb
-		: color.rgb + lens.rgb; 
+		: color.rgb + lens.rgb * saturate(1 - length(uv*2-1));
 
 	color.rgb = Tonemap::Apply(Tonemapper, color.rgb);
 
