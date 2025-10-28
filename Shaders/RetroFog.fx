@@ -26,6 +26,16 @@
 
 //Macros//////////////////////////////////////////////////////////////////////////////////
 
+#ifndef DEBUG_SAMPLE_LOCATION
+#define DEBUG_SAMPLE_LOCATION 0
+#endif
+
+#ifndef COLOR_SAMPLE_COUNT
+#define COLOR_SAMPLE_COUNT 200
+#endif
+
+#define INV_COLOR_SAMPLE_COUNT (1/COLOR_SAMPLE_COUNT)
+
 // Used for scaling screen coordinates while keeping them centered.
 #define scale(x, scale, center) ((x - center) * scale + center)
 
@@ -33,6 +43,9 @@
 #define _tex2D(sp, uv) tex2Dlod(sp, float4(uv, 0.0, 0.0))
 
 //Uniforms////////////////////////////////////////////////////////////////////////////////
+
+uniform float rsFrameTime < source = "frametime"; >;
+uniform float rsTimer < source = "timer"; >;
 
 uniform float fOpacity <
     ui_label = "Opacity";
@@ -92,11 +105,47 @@ uniform bool bCurved <
     ui_tooltip = "If enabled the fog will curve around the start position, otherwise it'll be completely linear and ignore side distance.";
 > = true;
 
+uniform float FadeSeconds <
+	ui_type = "slider";
+	ui_min = 0.1; ui_max = 20;
+> = 1;
+
+uniform float BlendMax <
+	ui_type = "slider";
+	ui_min = 0; ui_max = 1;
+> = 0;
+
+uniform float ColorSampleRegion <
+	ui_type = "slider";
+	ui_min = 0.1; ui_max = 0.9;
+> = 0.25;
+
+uniform float SampleSeed <
+    ui_type    = "drag";
+	ui_min = 0.0; ui_max = 20;
+> = 1.342;
+
+uniform bool AnimSamples = false;
+
 //Textures////////////////////////////////////////////////////////////////////////////////
 
 sampler2D sRetroFog_BackBuffer {
     Texture = ReShade::BackBufferTex;
     SRGBTexture = true;
+};
+
+#if DEBUG_SAMPLE_LOCATION
+texture texSampleDebug { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; Format = R8; MipLevels = 1; };
+storage<float> storSampleDebug { Texture = texSampleDebug; };
+sampler<float> sSampleDebug { Texture = texSampleDebug; };
+#endif
+
+texture1D texFogColor { Width = 1; Format = RGBA16F; MipLevels = 1; };
+storage1D<float4> storFogColor   { Texture = texFogColor; };
+sampler1D<float4> sFogColor
+{
+	Texture = texFogColor;
+	SRGBTexture = false;
 };
 
 //Functions///////////////////////////////////////////////////////////////////////////////
@@ -148,29 +197,70 @@ float dither(float x, float2 uv) {
         return 1.0;
 }
 
-float3 get_scene_color(float2 uv) {
-    static const int point_count = 8;
+float3 get_scene_color() {
+    static const int point_count = 9;
     static const float2 points[point_count] = {
+        float2(0.5, 0.5),
         float2(0.0, 0.0),
         float2(0.0, 0.5),
         float2(0.0, 1.0),        
         float2(0.5, 0.0),
-        //float2(0.5, 0.5),
         float2(0.5, 1.0),
         float2(1.0, 0.0),
         float2(1.0, 0.5),
         float2(1.0, 1.0)
     };
 
-    float3 color = _tex2D(sRetroFog_BackBuffer, points[0]).rgb;
+    float3 color = tex2Dlod(sRetroFog_BackBuffer, float4(points[0], 0, 5)).rgb;
     [unroll]
     for (int i = 1; i < point_count; ++i)
-        color += _tex2D(sRetroFog_BackBuffer, points[i]).rgb;
+    {
+    	float2 point = (points[i] * 2 - 1) * ColorSampleRegion + 1;
+        color += tex2Dlod(sRetroFog_BackBuffer, float4(point * 0.5, 0, 5)).rgb;
+    }
 
     return color / point_count;
 }
 
+float2 rnm( float2 tc, float t ) 
+{
+    float noise       = sin( dot( tc, float2( 12.9898, 78.233 ))) * ( 43758.5453 + t );
+    float noiseR      = frac( noise ) * 2.0 - 1.0;
+    float noiseG      = frac( noise * 1.2154 ) * 2.0 - 1.0; 
+    //float noiseB      = frac( noise * 1.3453 ) * 2.0 - 1.0;
+    //float noiseA      = frac( noise * 1.3647 ) * 2.0 - 1.0;
+    return float2( noiseR, noiseG);
+}
 //Shaders/////////////////////////////////////////////////////////////////////////////////
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CS_GetColor(uint3 tid : SV_GroupThreadID)
+{
+	float3 current = 0;
+	float seed = rsTimer * 0.01 * AnimSamples + SampleSeed;
+	[unroll]
+	for (int i = 0; i < COLOR_SAMPLE_COUNT; ++i)
+	{
+		float p = i / COLOR_SAMPLE_COUNT;
+		float2 point = rnm(float2(i * 0.5, i * 0.32), seed);
+		point *= ColorSampleRegion;
+		float2 uv = point * 0.5 + 0.5;
+		float3 samp = tex2Dlod(sRetroFog_BackBuffer, float4(uv, 0, 0)).rgb;
+		
+		current += samp / COLOR_SAMPLE_COUNT;
+		
+#if DEBUG_SAMPLE_LOCATION
+		float2 px = uv * float2(BUFFER_WIDTH, BUFFER_HEIGHT);
+		tex2Dstore(storSampleDebug, int2(px), 1);
+#endif
+	}
+	float3 prev = tex1Dfetch(storFogColor, 0).rgb;
+	float3 diff = current - prev;
+	float3 color = prev + diff * rsFrameTime * 0.001 / FadeSeconds;
+	
+	tex1Dstore(storFogColor, 0, float4(color, 1));
+}
 
 void PS_RetroFog(
     float4 position  : SV_POSITION,
@@ -187,17 +277,38 @@ void PS_RetroFog(
 
     float3 fog_color;
     if (bAutoColor)
-        fog_color = get_scene_color(uv);
+        fog_color = tex1Dfetch(sFogColor, 0).rgb;
     else
         fog_color = f3Color;
 
-    color.rgb = lerp(color.rgb, fog_color, fog);
+    color.rgb = lerp(color.rgb, lerp(fog_color, max(color.rgb, fog_color), BlendMax), fog);
+    
+#if DEBUG_SAMPLE_LOCATION
+    color.rgb = lerp(color.rgb, fog_color, all((1-uv) < 0.2));
+    color.rgb += tex2Dlod(sSampleDebug, float4(uv, 0, 0)).xxx;
+#endif
 }
 
 //Technique///////////////////////////////////////////////////////////////////////////////
 
 technique RetroFog {
-    pass {
+
+#if DEBUG_SAMPLE_LOCATION
+	pass ClearPass
+	{
+        VertexShader = PostProcessVS;
+		RenderTarget = texSampleDebug;
+		ClearRenderTargets = true;
+	}
+#endif
+	pass GetColor
+	{
+		DispatchSizeX = 1;
+		DispatchSizeY = 1;
+		DispatchSizeZ = 1;
+		ComputeShader = CS_GetColor<1,1,1>;
+	}
+    pass Output {
         VertexShader = PostProcessVS;
         PixelShader  = PS_RetroFog;
         SRGBWriteEnable = true;
